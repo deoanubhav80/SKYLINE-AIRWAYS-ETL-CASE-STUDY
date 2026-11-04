@@ -1,0 +1,362 @@
+import pandas as pd                                   # tables
+import numpy as np                                    # random numbers and maths
+import matplotlib.pyplot as plt                       # charts
+
+rng = np.random.default_rng(21)                       # one seeded random generator: the same data every run
+# ---------- the airport master (airports.xlsx) ----------
+airports = pd.DataFrame({
+    "airport": ["BOM", "DEL", "BLR", "PNQ", "HYD", "MAA", "CCU", "GOI", "AMD", "COK", "JAI", "LKO"],   # 12 airport codes
+    "city": ["Mumbai", "Delhi", "Bengaluru", "Pune", "Hyderabad", "Chennai", "Kolkata", "Goa", "Ahmedabad", "Kochi", "Jaipur", "Lucknow"],
+    "state": ["Maharashtra", "Delhi", "Karnataka", "Maharashtra", "Telangana", "Tamil Nadu", "West Bengal", "Goa", "Gujarat", "Kerala", "Rajasthan", "Uttar Pradesh"],
+    "slot_capacity": [46, 70, 45, 20, 40, 30, 32, 16, 26, 22, 18, 18],    # runway slots per hour (rounded, made-up figures)
+})
+
+# ---------- the weather file (weather.csv): one row per airport per day ----------
+days = pd.date_range("2025-11-01", "2026-04-30", freq="D")           # the 181 days of the 6-month period
+fog_base = {"DEL": 0.30, "LKO": 0.25, "JAI": 0.10, "CCU": 0.06, "AMD": 0.03}   # chance of fog in peak winter (other airports: no fog)
+fog_month = {11: 0.25, 12: 1.0, 1: 1.0, 2: 0.35, 3: 0.03, 4: 0.0}   # fog is a Dec-Jan story: multiplier per month
+rain_base = {"MAA": 0.25, "CCU": 0.18, "COK": 0.20, "GOI": 0.10, "BLR": 0.10, "HYD": 0.08, "BOM": 0.06,
+             "PNQ": 0.06, "DEL": 0.06, "LKO": 0.06, "AMD": 0.03, "JAI": 0.03}   # chance of a rainy day at each airport
+rain_month = {11: 1.3, 12: 1.2, 1: 0.5, 2: 0.5, 3: 0.8, 4: 1.2}     # rain multiplier per month
+month_of_day = days.month                                           # month number of every day
+
+parts = []                                                          # one small table per airport will go here
+for a in airports["airport"]:                                       # go through the 12 airports
+    p_fog = fog_base.get(a, 0.0) * month_of_day.map(fog_month).to_numpy()    # fog chance for each day
+    p_rain = rain_base[a] * month_of_day.map(rain_month).to_numpy()          # rain chance for each day
+    fog = (rng.random(len(days)) < p_fog).astype(int)               # 1 = fog that day, 0 = no fog
+    rain_mm = np.where(rng.random(len(days)) < p_rain, rng.exponential(18, len(days)).round(1), 0.0)   # rain in mm (0 on dry days)
+    vis = np.where(fog == 1, rng.uniform(0.1, 0.9, len(days)),                                         # fog: very low visibility
+                   np.where(rain_mm > 10, rng.uniform(2, 5, len(days)), rng.uniform(5, 10, len(days)))).round(1)   # rain: medium, clear: high
+    parts.append(pd.DataFrame({"airport": a, "date": days, "rain_mm": rain_mm, "fog": fog, "visibility_km": vis}))   # save this airport's 181 weather rows
+weather = pd.concat(parts, ignore_index=True)                       # stack the 12 airports into one table
+print("Weather rows:", len(weather), "| fog days at DEL:", int(weather.loc[weather["airport"] == "DEL", "fog"].sum()))   # quick check
+# ---------- the flight schedule: which flight flies which route at what time ----------
+coords = {"BOM": (19.09, 72.87), "DEL": (28.56, 77.10), "BLR": (13.20, 77.71), "PNQ": (18.58, 73.92),
+          "HYD": (17.24, 78.43), "MAA": (12.99, 80.17), "CCU": (22.65, 88.45), "GOI": (15.38, 73.83),
+          "AMD": (23.07, 72.63), "COK": (10.15, 76.40), "JAI": (26.82, 75.81), "LKO": (26.76, 80.88)}   # approximate position, used only to get a realistic flight time
+congestion = {"DEL": 1.0, "BOM": 0.9, "BLR": 0.6, "CCU": 0.5, "HYD": 0.45, "PNQ": 0.45,
+              "MAA": 0.4, "GOI": 0.35, "AMD": 0.3, "JAI": 0.3, "LKO": 0.3, "COK": 0.25}   # our hidden story: how crowded each airport is
+
+def block_minutes(a, b):                                            # scheduled flight time between two airports
+    la1, lo1 = np.radians(coords[a])                                # position of airport a in radians
+    la2, lo2 = np.radians(coords[b])                                # position of airport b in radians
+    km = 6371 * 2 * np.arcsin(np.sqrt(np.sin((la2 - la1) / 2) ** 2 + np.cos(la1) * np.cos(la2) * np.sin((lo2 - lo1) / 2) ** 2))   # distance in km (haversine)
+    return int(round((35 + km / 11) / 5) * 5)                       # 35 min taxi/climb + distance at about 660 km/h, rounded to 5 min
+
+daily = {"BOM-DEL": 16, "BOM-BLR": 12, "DEL-BLR": 12, "DEL-HYD": 9, "DEL-CCU": 9, "BOM-HYD": 7, "BOM-MAA": 7, "BOM-CCU": 5,
+         "DEL-MAA": 6, "BLR-HYD": 6, "BLR-MAA": 6, "BLR-CCU": 4, "PNQ-DEL": 4, "PNQ-BLR": 4, "PNQ-HYD": 3, "GOI-BOM": 4,
+         "GOI-DEL": 3, "GOI-BLR": 4, "AMD-DEL": 5, "AMD-BOM": 5, "AMD-BLR": 3, "COK-BOM": 4, "COK-BLR": 4, "COK-DEL": 3,
+         "JAI-BOM": 4, "LKO-BOM": 4, "LKO-DEL": 3, "HYD-CCU": 3, "HYD-MAA": 3, "CCU-MAA": 3}   # flights per day in EACH direction of a route
+
+slots = np.arange(330, 1380, 5)                                     # possible departure times: 05:30 to 22:55, in minutes after midnight
+hour_weight = {5: 2, 6: 6, 7: 8, 8: 8, 9: 6, 10: 4, 11: 4, 12: 3, 13: 3, 14: 3, 15: 4, 16: 5,
+               17: 7, 18: 8, 19: 8, 20: 6, 21: 4, 22: 2}            # airlines fly more in the morning and evening peaks
+w = np.array([hour_weight[m // 60] for m in slots], dtype=float)    # a weight for every possible time
+w = w / w.sum()                                                     # turn weights into probabilities
+fixed_times = {"PNQ-DEL": [420, 690, 1005, 1215]}                   # PNQ-DEL departs at 07:00, 11:30, 16:45, 20:15 every day
+
+plan = []                                                           # one row per flight number
+number = 100                                                        # flight numbers start at SK101
+for pair, n_flights in daily.items():                               # go through every route pair
+    a, b = pair.split("-")                                          # the two airports of the pair
+    for o, d in [(a, b), (b, a)]:                                   # both directions
+        times = fixed_times.get(o + "-" + d)                        # a fixed timetable, if we gave one
+        if times is None:                                           # otherwise pick random departure times
+            times = rng.choice(slots, size=n_flights, replace=False, p=w)   # distinct times, more likely in peak hours
+        for t in sorted(times):                                     # one flight number per departure time
+            number += 1                                             # next flight number
+            plan.append(["SK" + str(number), o, d, int(t), block_minutes(o, d)])   # flight_no, origin, destination, departure minute, flight time
+plan = pd.DataFrame(plan, columns=["flight_no", "origin", "destination", "dep_min", "block_min"])   # the timetable
+print("Flight numbers in the timetable:", len(plan))                # every flight number flies every day
+# ---------- fly the timetable for 181 days and add delays, cancellations and diversions ----------
+fl = plan.merge(pd.DataFrame({"day": days}), how="cross")           # every flight number on every day
+fl["sched_dep"] = fl["day"] + pd.to_timedelta(fl["dep_min"], unit="m")           # scheduled departure (date + time)
+fl["sched_arr"] = fl["sched_dep"] + pd.to_timedelta(fl["block_min"], unit="m")   # scheduled arrival
+ow = weather.rename(columns={"airport": "origin", "date": "day", "rain_mm": "o_rain", "fog": "o_fog"})[["origin", "day", "o_rain", "o_fog"]]   # weather at the origin
+dw = weather.rename(columns={"airport": "destination", "date": "day", "rain_mm": "d_rain", "fog": "d_fog"})[["destination", "day", "d_rain", "d_fog"]]   # weather at the destination
+fl = fl.merge(ow, on=["origin", "day"], how="left").merge(dw, on=["destination", "day"], how="left")   # attach both weathers to every flight
+fl = fl.sort_values(["sched_dep", "flight_no"]).reset_index(drop=True)           # order like a system export: by time
+n = len(fl)                                                         # number of flights
+
+hour = (fl["dep_min"] // 60).to_numpy()                             # departure hour of each flight
+peak = np.isin(hour, [6, 7, 8, 9, 17, 18, 19, 20]).astype(float)    # 1 = departs in a peak hour
+early = np.isin(hour, [5, 6, 7, 8, 9, 10]).astype(float)            # 1 = morning departure (fog is thickest then)
+cong = fl["origin"].map(congestion).to_numpy()                      # how crowded the origin airport is
+o_fog, d_fog = fl["o_fog"].to_numpy(), fl["d_fog"].to_numpy()       # fog at origin / destination
+o_wet = (fl["o_rain"].to_numpy() > 10).astype(float)                # heavy rain at the origin
+d_wet = (fl["d_rain"].to_numpy() > 10).astype(float)                # heavy rain at the destination
+
+mean_dep = 12 + 20 * cong * peak + 6 * cong + o_fog * (15 + 12 * early) + o_wet * 10   # average departure delay for each flight
+dep_delay = (rng.exponential(mean_dep) - 4).round()                 # many small delays, a few big ones (minutes)
+arr_delay = (dep_delay + rng.normal(-3, 5, n) + d_fog * 10 + d_wet * 5).round()   # arrival delay = departure delay +- air time changes
+cancelled = rng.random(n) < (0.012 + 0.08 * o_fog + 0.03 * d_fog + 0.03 * o_wet)   # cancellation chance rises with fog and rain
+diverted = (~cancelled) & (rng.random(n) < (0.004 + 0.025 * d_fog))                # diversion chance rises with fog at the destination
+arr_delay = np.where(diverted, arr_delay + rng.integers(60, 150, n), arr_delay)    # a diverted flight arrives very late
+
+fl["actual_dep"] = (fl["sched_dep"] + pd.to_timedelta(dep_delay, unit="m")).mask(cancelled)   # actual times are EMPTY for cancelled flights
+fl["actual_arr"] = (fl["sched_arr"] + pd.to_timedelta(arr_delay, unit="m")).mask(cancelled)   # same for arrival
+fl["aircraft"] = rng.choice(["A320", "A321", "B737-800", "ATR 72"], n, p=[0.4, 0.2, 0.3, 0.1])  # aircraft type
+
+bad = rng.choice(np.flatnonzero(~cancelled), 150, replace=False)   # 150 operated flights get a "system clock error"
+fl.loc[bad, "actual_arr"] = fl.loc[bad, "actual_dep"].to_numpy() - pd.to_timedelta(rng.integers(15, 240, 150), unit="m").to_numpy()   # arrival BEFORE departure
+
+state = np.where(cancelled, "Cancelled", np.where(diverted, "Diverted", "Departed"))   # the true status of each flight
+spelling = {"Cancelled": ["Cancelled", "CNX", "cancelled"], "Diverted": ["Diverted", "DIVERTED"], "Departed": ["Departed", "departed"]}   # how systems write it
+fl["status"] = [spelling[s][rng.integers(len(spelling[s]))] for s in state]   # pick a random spelling for every flight
+print("Flights built:", n)                                          # about 60,000
+# ---------- turn the clean truth into messy files ----------
+def messy_code(codes):                                              # make airport codes messy
+    r = rng.random(len(codes))                                      # a random number per row
+    out = codes.copy()                                              # start from the clean codes
+    out = out.mask(r < 0.04, codes.str.lower())                                # 'bom'
+    out = out.mask((r >= 0.04) & (r < 0.08), " " + codes.str.lower())          # ' bom'
+    out = out.mask((r >= 0.08) & (r < 0.12), codes.str.capitalize())           # 'Del'
+    out = out.mask((r >= 0.12) & (r < 0.16), codes + " ")                      # 'BOM '
+    return out                                                      # about 16% of the codes are now messy
+
+def time_text(col):                                                 # write datetimes as text in TWO formats
+    twelve = rng.random(len(col)) < 0.30                            # 30% of the cells use the 12-hour style
+    s24 = col.dt.strftime("%Y-%m-%d %H:%M")                         # 24-hour style: 2025-11-03 18:45
+    s12 = col.dt.strftime("%Y-%m-%d %I:%M %p")                      # 12-hour style: 2025-11-03 06:45 PM
+    return pd.Series(np.where(twelve, s12, s24), index=col.index).where(col.notna())   # empty stays empty (cancelled flights)
+
+raw = fl[["flight_no", "origin", "destination", "sched_dep", "actual_dep", "sched_arr", "actual_arr", "aircraft", "status"]].copy()   # only the columns the case lists
+raw["origin"] = messy_code(raw["origin"])                           # messy origin codes
+raw["destination"] = messy_code(raw["destination"])                 # messy destination codes
+for c in ["sched_dep", "actual_dep", "sched_arr", "actual_arr"]:    # the four time columns
+    raw[c] = time_text(raw[c])                                      # text in two formats
+raw = pd.concat([raw, raw.sample(800, random_state=3)], ignore_index=True)   # the same 800 flight rows saved twice (duplicates)
+
+raw.to_csv("flights.csv", index=False)                              # save like a real system export
+airports.to_excel("airports.xlsx", index=False)                     # save like a file from the planning team
+weather.to_csv("weather.csv", index=False)                          # save like a weather feed export
+print("Raw files created: flights.csv", raw.shape, "| airports.xlsx", airports.shape, "| weather.csv", weather.shape)   # done
+flights = pd.read_csv("flights.csv")                                # read the flight export
+airports = pd.read_excel("airports.xlsx")                           # read the airport master
+weather = pd.read_csv("weather.csv")                                # read the weather feed
+print("flights :", flights.shape)                                   # rows and columns
+print("airports:", airports.shape)                                  # rows and columns
+print("weather :", weather.shape)                                   # rows and columns
+display(flights.head())                                             # first rows of the flights
+flights.info()                                                      # column types: the times are still plain text
+time_cols = ["sched_dep", "actual_dep", "sched_arr", "actual_arr"]  # the four time columns
+dq = []                                                             # the report will be a list of rows
+def add(source, check, count):                                      # add one line to the report
+    dq.append({"source": source, "check": check, "count": int(count)})   # one row: where, what we checked, how many
+
+not_cancelled = ~flights["status"].str.strip().str.lower().isin(["cancelled", "cnx"])   # rows that should have actual times
+
+add("flights", "rows", len(flights))                                                          # size of the file
+add("flights", "exact duplicate rows", flights.duplicated().sum())                            # same row saved twice
+add("flights", "origin spellings (should be 12)", flights["origin"].nunique())                # too many = messy codes
+add("flights", "destination spellings (should be 12)", flights["destination"].nunique())      # too many = messy codes
+add("flights", "origin codes with wrong case or spaces", (flights["origin"] != flights["origin"].str.strip().str.upper()).sum())   # messy origin
+add("flights", "destination codes with wrong case or spaces", (flights["destination"] != flights["destination"].str.strip().str.upper()).sum())   # messy destination
+add("flights", "status spellings (should be 3)", flights["status"].nunique())                 # Cancelled / CNX / cancelled ...
+for c in time_cols:                                                                           # check each time column
+    add("flights", c + " in 12-hour AM/PM format", flights[c].str.contains("AM|PM", na=False).sum())   # the second time format
+add("flights", "missing actual_dep", flights["actual_dep"].isna().sum())                      # empty actual departure
+add("flights", "missing actual_arr", flights["actual_arr"].isna().sum())                      # empty actual arrival
+add("flights", "missing actual times on NON-cancelled flights", (flights["actual_dep"].isna() & not_cancelled).sum())   # 0 means every gap is a cancelled flight
+add("flights", "arrival before departure (impossible)",
+    (pd.to_datetime(flights["actual_arr"], format="mixed") < pd.to_datetime(flights["actual_dep"], format="mixed")).sum())   # system clock errors
+add("airports", "rows", len(airports))                                                        # size of the master
+add("airports", "duplicate airport codes", airports["airport"].duplicated().sum())            # codes must be unique
+add("airports", "missing values", airports.isna().sum().sum())                                # any empty cell
+add("weather", "rows (expected 12 airports x 181 days = 2172)", len(weather))                 # one row per airport per day
+add("weather", "duplicate airport-date pairs", weather.duplicated(subset=["airport", "date"]).sum())   # must be unique
+add("weather", "missing values", weather.isna().sum().sum())                                  # any empty cell
+add("weather", "fog days (fog = 1)", weather["fog"].sum())                                    # how many airport-days with fog
+
+dq_before = pd.DataFrame(dq)                                        # the report as a table
+display(dq_before)                                                  # put these numbers in the report
+rows_log = [("raw flight rows", len(flights))]                      # remember the row count after each step
+def log(step, df):                                                  # print and remember the row count
+    print(f"{step:<36}: {len(df):>6} rows")                         # show the step name and the rows left
+    rows_log.append((step, len(df)))                                # remember it for the data_quality sheet
+
+# --- 1. standardise airport codes ---
+for c in ["origin", "destination"]:                                 # both code columns
+    flights[c] = flights[c].str.strip().str.upper()                 # " bom" -> "BOM", "Del" -> "DEL"
+unknown = (~flights["origin"].isin(airports["airport"])) | (~flights["destination"].isin(airports["airport"]))   # codes we do not know
+print("origin spellings now:", flights["origin"].nunique(), "| codes not in the airport master:", int(unknown.sum()))   # 12 and 0
+
+# --- 2. standardise status with a mapping dictionary ---
+status_map = {"cnx": "Cancelled", "cancelled": "Cancelled", "departed": "Departed", "diverted": "Diverted"}   # every spelling we saw
+flights["status"] = flights["status"].str.strip().str.lower().map(status_map)   # lower case first, then map
+print(flights["status"].value_counts(dropna=False).to_dict())       # a NaN here would mean a spelling we forgot
+
+# --- 3. parse the times and calculate delays in minutes ---
+for c in time_cols:                                                 # the four time columns
+    flights[c] = pd.to_datetime(flights[c], format="mixed")         # handles "18:45" style and "06:45 PM" style together
+flights["dep_delay_min"] = (flights["actual_dep"] - flights["sched_dep"]).dt.total_seconds() / 60   # departure delay in minutes
+flights["arr_delay_min"] = (flights["actual_arr"] - flights["sched_arr"]).dt.total_seconds() / 60   # arrival delay in minutes
+log("after parsing times", flights)                                 # no rows removed yet
+
+# --- 4. remove duplicate flights ---
+flights = flights.drop_duplicates(subset=["flight_no", "sched_dep"]).reset_index(drop=True)   # one flight number departs once per scheduled time
+log("after removing duplicates", flights)                           # 800 rows fewer
+rows_after_dedupe = len(flights)                                    # needed for the Spark check later
+
+# --- 5. remove impossible rows, keep cancelled flights as a flag ---
+impossible = flights["actual_arr"] < flights["actual_dep"]          # arrival before departure (cancelled rows are empty, so False)
+print("impossible rows found:", int(impossible.sum()))              # report it
+flights = flights[~impossible].copy()                               # drop them
+flights["is_cancelled"] = flights["status"] == "Cancelled"          # separate flag for cancelled flights
+flights["is_diverted"] = flights["status"] == "Diverted"            # separate flag for diverted flights
+log("after removing impossible rows", flights)                      # cancelled flights are still here
+# --- 6. join with airports (origin details) and weather (origin and destination) ---
+flights = flights.merge(
+    airports.rename(columns={"airport": "origin", "city": "origin_city", "state": "origin_state", "slot_capacity": "origin_slots"}),
+    on="origin", how="left", validate="many_to_one")                # origin city, state, slot capacity (each flight matches ONE airport)
+flights["date"] = flights["sched_dep"].dt.normalize()               # the flight date without the time
+weather["date"] = pd.to_datetime(weather["date"])                   # weather date: text -> real date
+flights = flights.merge(weather, left_on=["origin", "date"], right_on=["airport", "date"],
+                        how="left", validate="many_to_one").drop(columns="airport")   # weather at the origin on the flight date
+flights = flights.merge(
+    weather.rename(columns={"airport": "destination", "rain_mm": "dest_rain_mm", "fog": "dest_fog", "visibility_km": "dest_visibility_km"}),
+    on=["destination", "date"], how="left", validate="many_to_one") # also the weather at the destination (an extra: arrivals suffer from fog there)
+log("after the joins", flights)                                     # must be the same as before the joins
+print("flights without origin weather:", int(flights["fog"].isna().sum()), "| without destination weather:", int(flights["dest_fog"].isna().sum()))   # must be 0
+
+# --- 7. create the new columns ---
+flights["route"] = flights["origin"] + "-" + flights["destination"] # route such as PNQ-DEL
+flights["hour_of_day"] = flights["sched_dep"].dt.hour               # scheduled departure hour
+flights["day_of_week"] = flights["sched_dep"].dt.day_name()         # Monday ... Sunday
+flights["on_time"] = flights["arr_delay_min"] <= 15                 # on time = arrives at most 15 minutes late (empty delay -> False)
+fog_any = (flights["fog"] == 1) | (flights["dest_fog"] == 1)        # fog at either end of the route
+rain_any = (flights["rain_mm"] > 10) | (flights["dest_rain_mm"] > 10)   # heavy rain (over 10 mm) at either end
+flights["weather_day"] = np.select([fog_any, rain_any], ["Fog", "Rain"], default="Clear")   # Fog first, then Rain, otherwise Clear
+clean = flights                                                     # the final clean table
+print("final rows:", len(clean), "| columns:", clean.shape[1])      # size of the clean table
+display(clean[["flight_no", "route", "sched_dep", "arr_delay_min", "status", "on_time", "weather_day"]].head())   # a quick look
+ops = clean[~clean["is_cancelled"]]                                 # flights that operated (departed or diverted)
+
+def kpis(by):                                                       # one function builds a KPI table for any grouping
+    g_all = clean.groupby(by)                                       # all scheduled flights
+    g_ops = ops.groupby(by)                                         # operated flights only
+    return pd.DataFrame({
+        "flights": g_all.size(),                                    # scheduled flights
+        "otp_pct": g_ops["on_time"].mean() * 100,                   # % arriving within 15 minutes
+        "avg_arr_delay_min": g_ops["arr_delay_min"].mean(),         # average arrival delay
+        "cancel_pct": g_all["is_cancelled"].mean() * 100,           # % cancelled
+    }).round(1)
+
+route_kpi = kpis("route").sort_values("otp_pct")                    # worst routes first
+airport_kpi = kpis("origin").join(airports.set_index("airport")[["city", "slot_capacity"]]).sort_values("otp_pct")   # by origin airport
+hour_kpi = kpis("hour_of_day")                                      # by departure hour
+weather_kpi = kpis("weather_day").reindex(["Clear", "Rain", "Fog"]) # by weather
+
+otp_overall = ops["on_time"].mean() * 100                           # airline OTP
+print("Scheduled flights:", len(clean), "| operated:", len(ops))    # sizes
+print("OTP overall      :", round(otp_overall, 1), "%")             # the DGCA number
+print("Cancellation rate:", round(clean["is_cancelled"].mean() * 100, 1), "%")   # cancelled share
+print("Avg arrival delay:", round(ops["arr_delay_min"].mean(), 1), "min")        # average delay
+print()                                                             # empty line
+print("OTP by origin airport (worst first):")                       # heading
+display(airport_kpi)                                                # airport KPIs
+print("OTP by hour of day:")                                        # heading
+display(hour_kpi)                                                   # hour KPIs
+print("Weather (fog / rain at EITHER end of the route):")           # heading
+display(weather_kpi)                                                # weather KPIs
+print("10 worst routes by OTP:")                                    # heading
+display(route_kpi.head(10))                                         # worst routes
+steps = pd.DataFrame({"source": "pipeline", "check": [s for s, c in rows_log], "count": [c for s, c in rows_log]})   # row count after every step
+data_quality = pd.concat([dq_before, steps], ignore_index=True)     # the quality report + the row counts in one sheet
+
+with pd.ExcelWriter("skyline_clean.xlsx") as xl:                    # one file, several sheets
+    clean.to_excel(xl, sheet_name="clean_flights", index=False)     # sheet 1: the clean table
+    route_kpi.to_excel(xl, sheet_name="route_kpis")                 # sheet 2: route KPIs
+    airport_kpi.to_excel(xl, sheet_name="airport_kpis")             # sheet 3: airport KPIs
+    data_quality.to_excel(xl, sheet_name="data_quality", index=False)   # sheet 4: data quality report
+    hour_kpi.to_excel(xl, sheet_name="hour_kpis")                   # extra sheet: KPIs by hour
+    weather_kpi.to_excel(xl, sheet_name="weather_kpis")             # extra sheet: KPIs by weather
+
+check = pd.ExcelFile("skyline_clean.xlsx")                          # open the file again to prove it was saved
+print("Saved skyline_clean.xlsx with sheets:", check.sheet_names)   # list the sheets
+print("clean_flights rows in the file:", len(pd.read_excel(check, "clean_flights")))   # must equal the clean table
+late = ops[~ops["on_time"]]                                         # flights that arrived more than 15 minutes late
+share_clear = (late["weather_day"] == "Clear").mean() * 100         # % of late flights with clear weather at both ends
+fog_gap = weather_kpi.loc["Fog", "avg_arr_delay_min"] - weather_kpi.loc["Clear", "avg_arr_delay_min"]   # extra minutes on fog days
+print("Late flights:", len(late), "| with clear weather at both airports:", round(share_clear, 1), "%")   # the key number
+print("Share of all operated flights that had clear weather:", round((ops["weather_day"] == "Clear").mean() * 100, 1), "%")   # for comparison
+
+fig, ax = plt.subplots(figsize=(7, 4))                              # chart 1: size
+bars = ax.bar(weather_kpi.index, weather_kpi["avg_arr_delay_min"], color=["#bbbbbb", "#bbbbbb", "#e63946"], width=0.55)   # fog in red
+ax.bar_label(bars, fmt="%.0f min")                                  # write the value on each of the 3 bars
+ax.set_ylabel("average arrival delay (minutes)")                    # label with units
+ax.set_title(f"Fog adds {fog_gap:.0f} min, yet {share_clear:.0f}% of late flights had clear weather")   # the insight is the title
+ax.spines[["top", "right"]].set_visible(False)                      # cleaner look
+plt.show()                                                          # draw it
+
+worst10 = route_kpi.head(10)                                        # the 10 routes with the lowest OTP
+colours = ["#e63946" if r == worst10.index[0] else "#bbbbbb" for r in worst10.index[::-1]]   # worst route in red
+fig, ax = plt.subplots(figsize=(8, 4.5))                            # chart 2: size
+ax.barh(worst10.index[::-1], worst10["otp_pct"].iloc[::-1], color=colours)   # worst route on top
+ax.axvline(otp_overall, color="#555555", linestyle="--")            # the airline average as a reference line
+ax.text(otp_overall + 0.5, 0.2, f"airline average {otp_overall:.0f}%", color="#555555")   # label the line
+ax.set_xlim(0, 100)                                                 # OTP is a percentage
+ax.set_xlabel("on-time performance (% of operated flights)")        # label with units
+ax.set_title(f"{worst10.index[0]} is the least punctual route: only {worst10['otp_pct'].iloc[0]:.0f}% on time")   # the insight is the title
+ax.spines[["top", "right"]].set_visible(False)                      # cleaner look
+plt.show()                                                          # draw it
+
+heat = ops.pivot_table(index="origin", columns="hour_of_day", values="arr_delay_min", aggfunc="mean")   # airport x hour average delay
+heat = heat.loc[airport_kpi.sort_values("avg_arr_delay_min", ascending=False).index]   # most delayed airport on top
+hot_r, hot_c = np.unravel_index(np.nanargmax(heat.values), heat.shape)   # position of the worst cell
+fig, ax = plt.subplots(figsize=(10, 5))                             # chart 3: size
+im = ax.imshow(heat.values, cmap="Reds", aspect="auto")             # one colour (red): darker = more delay
+ax.set_xticks(range(len(heat.columns)))                             # one tick per hour
+ax.set_xticklabels(heat.columns)                                    # hour labels
+ax.set_yticks(range(len(heat.index)))                               # one tick per airport
+ax.set_yticklabels(heat.index)                                      # airport labels
+ax.set_xlabel("scheduled departure hour")                           # label
+fig.colorbar(im, ax=ax, label="average arrival delay (minutes)")    # colour scale with units
+ax.set_title(f"Delay hotspot: {heat.index[hot_r]} flights departing at {heat.columns[hot_c]}:00 ({heat.values[hot_r, hot_c]:.0f} min on average)")   # the insight is the title
+plt.show()                                                          # draw it
+def route_scorecard(route):                                         # one function = one answer for the COO
+    d = clean[clean["route"] == route]                              # all flights of this route
+    if d.empty:                                                     # a route that does not exist
+        print("No flights found for", route)                        # tell the user
+        return                                                      # stop
+    o = d[~d["is_cancelled"]]                                       # operated flights of this route
+    otp = o["on_time"].mean() * 100                                 # on-time %
+    avg = o["arr_delay_min"].mean()                                 # average arrival delay
+    cancel = d["is_cancelled"].mean() * 100                         # cancellation %
+    by_hour = o.groupby("hour_of_day")["arr_delay_min"].mean()      # average delay for each departure hour
+    worst_hour = by_hour.idxmax()                                   # the hour with the most delay
+    t = d[d["hour_of_day"] == worst_hour]["sched_dep"].dt.strftime("%H:%M").mode()[0]   # the scheduled departure time in that hour
+    t2 = (pd.to_datetime(t, format="%H:%M") + pd.Timedelta(minutes=30)).strftime("%H:%M")   # the same time + 30 minutes
+    bad = o[o["weather_day"] != "Clear"]["arr_delay_min"].mean()    # average delay on fog/rain days
+    good = o[o["weather_day"] == "Clear"]["arr_delay_min"].mean()   # average delay on clear days
+    gap = bad - good                                                # minutes the weather costs
+    rank = int(route_kpi["otp_pct"].rank().loc[route])              # 1 = worst route of all
+    print("=" * 56)                                                 # a line
+    print("ROUTE SCORECARD:", route, "(", len(d), "scheduled flights )")   # heading
+    print("On-time performance :", round(otp, 1), "%  (airline:", round(otp_overall, 1), "%, rank", rank, "of", len(route_kpi), "from worst)")   # OTP
+    print("Average delay       :", round(avg, 1), "min")            # delay
+    print("Worst hour          :", f"{worst_hour}:00 ({by_hour.max():.0f} min average, departure {t})")   # worst hour
+    print("Cancellation rate   :", round(cancel, 1), "%")           # cancellations
+    print("Weather effect      :", f"+{gap:.0f} min on fog/rain days ({bad:.0f} vs {good:.0f} min on clear days)")   # weather
+    if gap >= 10:                                                   # weather matters on this route
+        print("ADVICE: move the", t, "departure to", t2, "on fog/rain days.")   # shift the worst departure
+    else:                                                           # weather is not the main reason
+        print("ADVICE: add a 20-minute buffer to the", t, "departure; weather is not the main reason here.")   # buffer
+    print("=" * 56)                                                 # a line
+
+route_scorecard("PNQ-DEL")                                          # the example route from the case
+route_scorecard(route_kpi.index[0])                                 # the worst route of the airline
+#pip install -q pyspark
+try:                                                                # if Spark is not available the rest of the notebook still works
+    from pyspark.sql import SparkSession, functions as F            # Spark tools
+    spark = SparkSession.builder.master("local[*]").appName("skyline").getOrCreate()   # start Spark on this machine
+    sdf = spark.read.csv("flights.csv", header=True)                # read the SAME raw file
+    ts = lambda c: F.coalesce(F.try_to_timestamp(F.col(c), F.lit("yyyy-MM-dd HH:mm")), F.try_to_timestamp(F.col(c), F.lit("yyyy-MM-dd hh:mm a")))   # try the 24-hour format, then the AM/PM one
+    sdf_clean = sdf.withColumn("origin", F.upper(F.trim("origin"))).withColumn("dep_delay_min", (F.unix_timestamp(ts("actual_dep")) - F.unix_timestamp(ts("sched_dep"))) / 60).dropDuplicates(["flight_no", "sched_dep"])   # the Transform in one chained line
+    print("Spark rows after removing duplicates:", sdf_clean.count(), "| pandas rows after removing duplicates:", rows_after_dedupe)   # must match
+    print("Average departure delay, operated flights (Spark):", round(sdf_clean.filter(F.col("dep_delay_min").isNotNull()).agg(F.avg("dep_delay_min")).first()[0], 2))   # one number to compare
+    print("Average departure delay, operated flights (pandas, before removing impossible rows):", round(pd.read_csv("flights.csv").drop_duplicates().pipe(lambda x: (pd.to_datetime(x["actual_dep"], format="mixed") - pd.to_datetime(x["sched_dep"], format="mixed")).dt.total_seconds().div(60).mean()), 2))   # same number from pandas
+    spark.stop()                                                    # shut Spark down
+except Exception as e:                                              # any problem: say so, do not crash
+    print("Spark bonus skipped:", e)                                # show the reason
